@@ -2,16 +2,78 @@
 Single UAV Agent Implementation
 Uses LangGraph for stateful agent execution with improved control flow
 """
+import time
 from typing import Dict, Any, Optional, List
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 from langchain_classic.agents import create_react_agent
 from langchain_classic.agents import AgentExecutor
 from langchain_classic.prompts import PromptTemplate
+from langchain_core.callbacks import BaseCallbackHandler
 
 from src.api_client import UAVAPIClient
 from src.tools import create_uav_tools
 from src.prompts import get_uav_agent_prompt, PARSING_ERROR_TEMPLATE
+from src.utils import LLMLogger
+
+
+class LLMLoggingCallback(BaseCallbackHandler):
+    """
+    Callback handler for logging LLM calls in the agent executor
+    """
+
+    def __init__(self, logger: LLMLogger, user_command: str, debug: bool = False):
+        """
+        Initialize the callback handler
+
+        Args:
+            logger: LLMLogger instance
+            user_command: Original user command for context
+            debug: Enable debug output
+        """
+        super().__init__()
+        self.logger = logger
+        self.user_command = user_command
+        self.debug = debug
+        self.call_count = 0
+
+    def on_llm_start(self, serialized: Dict[str, Any], prompts: List[str], **kwargs) -> None:
+        """Called when LLM starts processing"""
+        self.call_count += 1
+        self.start_time = time.time()
+        self.current_prompts = prompts
+
+        if self.debug:
+            print(f"[LLM_CALLBACK] LLM call #{self.call_count} started")
+
+    def on_llm_end(self, response, **kwargs) -> None:
+        """Called when LLM finishes processing"""
+        execution_time = time.time() - self.start_time
+
+        # Get the first prompt and response
+        prompt_text = self.current_prompts[0] if self.current_prompts else "N/A"
+        response_text = str(response.generations[0][0].text) if response.generations else "N/A"
+
+        # Extract model info from response
+        model_info = getattr(response, 'response_metadata', {}).get('model', 'unknown')
+
+        # Log the LLM call
+        self.logger.log_llm_call(
+            agent_id="[AGENT_SINGLE] UAVAgent",
+            prompt=prompt_text,
+            response=response_text,
+            variables={"input": self.user_command},
+            metadata={
+                "model": model_info,
+                "user_command": self.user_command,
+                "execution_time": execution_time,
+                "call_number": self.call_count,
+                "success": True
+            }
+        )
+
+        if self.debug:
+            print(f"[LLM_CALLBACK] LLM call #{self.call_count} logged in {execution_time:.3f}s")
 
 
 class UAVAgentGraph:
@@ -31,7 +93,8 @@ class UAVAgentGraph:
         llm_base_url: Optional[str] = None,
         temperature: float = 0.1,
         verbose: bool = True,
-        debug: bool = False
+        debug: bool = False,
+        enable_llm_logging: bool = True
     ):
         """
         Initialize the UAV Agent
@@ -45,10 +108,17 @@ class UAVAgentGraph:
             temperature: LLM temperature (lower = more deterministic)
             verbose: Enable verbose output
             debug: Enable debug output
+            enable_llm_logging: Enable LLM call logging
         """
         self.client = client
         self.verbose = verbose
         self.debug = debug
+
+        # Initialize LLM logger
+        self.llm_logger = LLMLogger(enabled=enable_llm_logging)
+        self.enable_llm_logging = enable_llm_logging
+        if enable_llm_logging and self.debug:
+            print("[LOGGER] LLM logging enabled for UAV Agent")
 
         # Initialize LLM
         self.llm = self._create_llm(llm_provider, llm_model, llm_api_key, llm_base_url, temperature)
@@ -189,20 +259,36 @@ Drones: {len(drones)} available
         """
         if self.debug:
             print(f"\n{'='*60}")
-            print(f"🎯 Executing Command")
+            print(f"[TARGET] Executing Command")
             print(f"{'='*60}")
             print(f"Command: {command}")
             print(f"{'='*60}\n")
 
         try:
             if self.debug:
-                print("🔄 Invoking agent executor...")
+                print("[AI] Invoking agent executor...")
 
-            result = self.agent_executor.invoke({"input": command})
+            # Create callback for LLM logging if enabled
+            callbacks = []
+            if self.enable_llm_logging and self.llm_logger:
+                callback = LLMLoggingCallback(
+                    logger=self.llm_logger,
+                    user_command=command,
+                    debug=self.debug
+                )
+                callbacks.append(callback)
+                if self.debug:
+                    print("[LOGGER] LLM logging callback attached")
+
+            # Invoke agent executor with callbacks
+            result = self.agent_executor.invoke(
+                {"input": command},
+                config={"callbacks": callbacks} if callbacks else {}
+            )
 
             if self.debug:
                 print(f"\n{'='*60}")
-                print("✅ Command Execution Complete")
+                print("[OK] Command Execution Complete")
                 print(f"{'='*60}")
                 print(f"Success: True")
                 print(f"Intermediate steps: {len(result.get('intermediate_steps', []))}")
@@ -216,7 +302,7 @@ Drones: {len(drones)} available
         except Exception as e:
             if self.debug:
                 print(f"\n{'='*60}")
-                print("❌ Command Execution Failed")
+                print("[FAIL] Command Execution Failed")
                 print(f"{'='*60}")
                 print(f"Error: {str(e)}")
                 print(f"{'='*60}\n")

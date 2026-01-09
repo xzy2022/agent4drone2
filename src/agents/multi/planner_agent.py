@@ -4,6 +4,7 @@ Responsible for conversation, intent parsing, and generating tool call plans
 """
 import json
 import re
+import time
 from typing import Dict, Any, List, Optional
 from langchain_classic.prompts import PromptTemplate
 from langchain_core.language_models import BaseChatModel
@@ -11,6 +12,7 @@ from langchain_core.language_models import BaseChatModel
 from src.api_client import UAVAPIClient
 from src.tools import UAVToolsRegistry
 from src.agents.multi.plan_schema import Plan, PlanStep
+from src.utils import LLMLogger
 
 
 class PlannerAgent:
@@ -30,7 +32,8 @@ class PlannerAgent:
         llm: BaseChatModel,
         client: UAVAPIClient,
         verbose: bool = False,
-        debug: bool = False
+        debug: bool = False,
+        enable_llm_logging: bool = True
     ):
         """
         Initialize the Planner Agent
@@ -40,11 +43,17 @@ class PlannerAgent:
             client: UAV API client
             verbose: Enable verbose output
             debug: Enable debug output
+            enable_llm_logging: Enable LLM call logging
         """
         self.llm = llm
         self.client = client
         self.verbose = verbose
         self.debug = debug
+
+        # Initialize LLM logger
+        self.llm_logger = LLMLogger(enabled=enable_llm_logging)
+        if enable_llm_logging and self.debug:
+            print("[LOGGER] LLM logging enabled for Planner Agent")
 
         # Get tool registry for tool information (Agent A needs to know what tools exist)
         self.tool_registry = UAVToolsRegistry(client)
@@ -210,11 +219,38 @@ Generate the execution plan as JSON:"""
             if self.verbose:
                 print("[AI] Invoking Planner Agent LLM...")
 
+            start_time = time.time()
             response = self.llm.invoke(prompt_text)
+            execution_time = time.time() - start_time
             raw_output = response.content
 
+            # Log LLM call
+            if self.llm_logger:
+                # Extract variables for display
+                variables = {
+                    "input": user_input,
+                    "tools_doc": getattr(self.prompt, 'partial_variables', {}).get('tools_doc', 'N/A')
+                }
+
+                # Get model info
+                model_info = getattr(self.llm, 'model_name', getattr(self.llm, 'model', 'unknown'))
+
+                self.llm_logger.log_llm_call(
+                    agent_id="[AGENT_A] Planner",
+                    prompt=prompt_text,
+                    response=raw_output,
+                    variables=variables,
+                    metadata={
+                        "model": model_info,
+                        "temperature": getattr(self.llm, 'temperature', 'unknown'),
+                        "user_command": user_input,
+                        "execution_time": execution_time,
+                        "success": True
+                    }
+                )
+
             if self.verbose:
-                print(f"\n📄 Raw Output:\n{raw_output}\n")
+                print(f"\n[RAW OUTPUT]\n{raw_output}\n")
 
             # Parse JSON from response
             plan_data = self._extract_json(raw_output)
