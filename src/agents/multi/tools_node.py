@@ -5,6 +5,7 @@ Stateless execution node - clears memory after each execution
 """
 from typing import Dict, Any, List, Optional
 import time
+import json
 
 from src.api_client import UAVAPIClient
 from src.tools import UAVToolsRegistry
@@ -245,8 +246,10 @@ class ToolsNode:
                         "error": f"Tool '{step.tool_name}' not found"
                     })
                 else:
-                    # Execute the tool
-                    output = tool.invoke(step.args)
+                    # Execute the tool with proper parameter format
+                    # Check if tool expects input_json parameter
+                    args = self._prepare_tool_args(tool, step.args)
+                    output = tool.invoke(args)
                     result = ExecutionResult(
                         step_id=step.step_id,
                         success=True,
@@ -476,6 +479,70 @@ class ToolsNode:
                 return available_tool
 
         return None
+
+    def _prepare_tool_args(self, tool, args: Dict[str, Any]) -> Any:
+        """
+        Prepare tool arguments in the expected format
+
+        Some tools expect parameters wrapped in an 'input_json' string,
+        while others accept direct dictionary parameters.
+
+        Args:
+            tool: The tool to invoke
+            args: Arguments from the plan step
+
+        Returns:
+            Properly formatted arguments for the tool
+        """
+        import inspect
+
+        # Get the tool's function signature
+        try:
+            # Get the underlying function
+            func = tool.func if hasattr(tool, 'func') else tool.run if hasattr(tool, 'run') else None
+            if func is None:
+                # Can't inspect, return args as-is
+                return args
+
+            # Get function signature
+            sig = inspect.signature(func)
+            params = list(sig.parameters.keys())
+
+            # Check if tool expects 'input_json' parameter
+            if 'input_json' in params:
+                # Tool expects JSON string - convert dict to JSON string
+                if isinstance(args, dict):
+                    # Don't double-wrap if already wrapped
+                    if 'input_json' in args:
+                        return args
+                    # Wrap in input_json
+                    return {'input_json': json.dumps(args)}
+                elif isinstance(args, str):
+                    # Already a string, wrap it
+                    return {'input_json': args}
+                else:
+                    return args
+            else:
+                # Tool accepts direct parameters
+                return args
+
+        except Exception as e:
+            # If inspection fails, try to detect by tool name
+            # Tools with input_json parameter pattern
+            input_json_tools = [
+                'move_to', 'move_towards', 'take_off', 'land',
+                'change_altitude', 'rotate', 'hover',
+                'take_photo', 'charge', 'calibrate', 'set_home',
+                'send_message', 'broadcast', 'return_home',
+                'get_drone_status', 'get_nearby_entities'
+            ]
+
+            tool_name = tool.name if hasattr(tool, 'name') else ''
+            if tool_name in input_json_tools:
+                if isinstance(args, dict) and 'input_json' not in args:
+                    return {'input_json': json.dumps(args)}
+
+            return args
 
     def _generate_summary(self, results: List[ExecutionResult]) -> str:
         """
