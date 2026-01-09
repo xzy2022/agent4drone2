@@ -128,7 +128,14 @@ class UAVAgentGraph:
 
         return PromptTemplate(
             template=prompt_template,
-            input_variables=["input", "agent_scratchpad"]
+            input_variables=["input", "agent_scratchpad"],
+            partial_variables={
+                "tools": "\n".join(
+                    f"- {name}: {desc}"
+                    for name, desc in zip(tool_names, tool_descriptions)
+                ),
+                "tool_names": ", ".join(tool_names),
+            },
         )
 
     def refresh_session_context(self):

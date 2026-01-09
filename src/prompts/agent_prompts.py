@@ -65,41 +65,31 @@ def get_uav_agent_prompt(tool_names: list, tool_descriptions: list) -> str:
     Returns:
         Formatted prompt string
     """
-    tools_section = "\n".join([
-        f"- {name}: {desc}"
-        for name, desc in zip(tool_names, tool_descriptions)
-    ])
-
-    return f"""{UAV_AGENT_SYSTEM_PROMPT}
-
-AVAILABLE TOOLS:
-You have access to these tools to accomplish your tasks: {', '.join(tool_names)}
-
-{tools_section}
-
-EXAMPLES:
-Question: What drones are available?
-Thought: I need to list all drones to see what's available
-Action: list_drones
-Action Input: {{}}
-Observation: [result will be returned here]
-
-Question: Take off drone-001 to 15 meters
-Thought: I need to take off the drone to the specified altitude
-Action: take_off
-Action Input: {{"drone_id": "drone-001", "altitude": 15.0}}
-Observation: Drone took off successfully
-
-Question: Move drone-001 to position x=100, y=50, z=20
-Thought: I need to move the drone to the specified coordinates
-Action: move_to
-Action Input: {{"drone_id": "drone-001", "x": 100.0, "y": 50.0, "z": 20.0}}
-Observation: Drone moved successfully
-
-Begin!
-
-Question: {{input}}
-Thought:{{{{agent_scratchpad}}}}"""
+    return (
+        f"{UAV_AGENT_SYSTEM_PROMPT}\n\n"
+        "AVAILABLE TOOLS:\n"
+        "You have access to these tools to accomplish your tasks: {tool_names}\n\n"
+        "{tools}\n\n"
+        "EXAMPLES:\n"
+        "Question: What drones are available?\n"
+        "Thought: I need to list all drones to see what's available\n"
+        "Action: list_drones\n"
+        "Action Input: {{}}\n"
+        "Observation: [result will be returned here]\n\n"
+        "Question: Take off drone-001 to 15 meters\n"
+        "Thought: I need to take off the drone to the specified altitude\n"
+        "Action: take_off\n"
+        "Action Input: {{\"drone_id\": \"drone-001\", \"altitude\": 15.0}}\n"
+        "Observation: Drone took off successfully\n\n"
+        "Question: Move drone-001 to position x=100, y=50, z=20\n"
+        "Thought: I need to move the drone to the specified coordinates\n"
+        "Action: move_to\n"
+        "Action Input: {{\"drone_id\": \"drone-001\", \"x\": 100.0, \"y\": 50.0, \"z\": 20.0}}\n"
+        "Observation: Drone moved successfully\n\n"
+        "Begin!\n\n"
+        "Question: {input}\n"
+        "Thought:{agent_scratchpad}"
+    )
 
 
 # ========== Multi-Agent Prompts ==========

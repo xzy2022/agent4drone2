@@ -1,5 +1,5 @@
 {
-  "selected_provider": "PPIO",
+  "selected_provider": "Ollama",
   "provider_configs": {
     "Ollama": {
       "type": "ollama",
@@ -9,8 +9,11 @@
       "requires_api_key": false,
       "api_key": "",
       "encoding": "utf-8",
-      "default_model": "llama2",
-      "default_models": [],
+      "default_model": "qwen3:1.7b",
+      "default_models": [
+        "qwen3:1.7b",
+        "qwen3:8b"
+      ],
       "allow_endpoint_edit": false,
       "allow_api_toggle": false,
       "system_prompt": ""

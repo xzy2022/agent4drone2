@@ -4,15 +4,21 @@ Refactored to use the new modular architecture in src/
 """
 import json
 import os
+import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from typing import Any, Dict, List, Optional
+from pathlib import Path
+
+# Ensure the repository root is on sys.path for robust imports
+_script_dir = Path(__file__).resolve().parent
+if str(_script_dir) not in sys.path:
+    sys.path.insert(0, str(_script_dir))
 
 from src.agents import UAVControlAgent
 from src.config import load_llm_settings, save_llm_settings
-from pathlib import Path
 
 # Try to import speech recognition with fallback
 try:
@@ -94,8 +100,8 @@ class UAVAgentGUI:
             "Ollama": {
                 "type": "ollama",
                 "base_url": "http://localhost:11434",
-                "default_model": "llama2",
-                "default_models": [],
+                "default_model": "qwen3:1.7b",
+                "default_models": ["qwen3:1.7b", "qwen3:8b"],
                 "requires_api_key": False,
                 "api_key": "",
             },
@@ -142,7 +148,8 @@ class UAVAgentGUI:
         self.setup_ui()
         self.update_provider_dropdown()
         self.on_provider_change()
-        self.root.after(400, lambda: self.initialize_agent(show_warnings=False))
+        # Initialize agent and show errors to user if it fails
+        self.root.after(400, lambda: self.initialize_agent(show_warnings=True))
         if SPEECH_AVAILABLE and AUDIO_AVAILABLE and WHISPER_AVAILABLE:
             self.root.after(200, self.load_whisper_pipeline)
 
