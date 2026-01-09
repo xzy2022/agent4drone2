@@ -1,29 +1,36 @@
 """
-Multi-Agent Coordinator
-Orchestrates multiple specialized agents for complex UAV missions
+Multi-Agent Coordinator (A/B Pipeline)
+Orchestrates Planner Agent (A) and Tools Node (B) in a pipeline
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
-from langchain_classic.agents import create_react_agent
-from langchain_classic.agents import AgentExecutor
-from langchain_classic.prompts import PromptTemplate
+from langchain_core.language_models import BaseChatModel
 
 from src.api_client import UAVAPIClient
-from src.state import MultiAgentState
-from src.prompts import get_multi_agent_prompt
-from .specialized_agents import NavigatorAgent, ReconnaissanceAgent, SafetyMonitorAgent
+from src.agents.multi.planner_agent import PlannerAgent
+from src.agents.multi.tools_node import ToolsNode
+from src.agents.multi.plan_schema import Plan, ValidatedPlan, ExecutionReport
 
 
 class MultiAgentCoordinator:
     """
-    Coordinates multiple specialized agents for complex UAV missions
+    Multi-Agent Coordinator using A/B Pipeline Architecture
 
-    This coordinator:
-    1. Decomposes complex missions into sub-tasks
-    2. Delegates tasks to specialized agents
-    3. Aggregates results from multiple agents
-    4. Ensures safe and coordinated execution
+    Architecture:
+    - Agent A (Planner): Parses user intent and generates execution plan
+    - Node B (Tools): Validates, fixes, and executes the plan
+
+    Pipeline Flow:
+    1. User Input → Agent A → Plan (JSON)
+    2. Plan → Node B → Validated Plan
+    3. Validated Plan → Node B → Execution Results
+    4. Results → Agent A → Final Summary (optional)
+    5. Final Summary → User
+
+    Key Design:
+    - Agent A: Conversational, strategic, keeps context
+    - Node B: Stateless, tactical, no memory between executions
     """
 
     def __init__(
@@ -42,7 +49,7 @@ class MultiAgentCoordinator:
 
         Args:
             client: UAV API client instance
-            llm_provider: LLM provider
+            llm_provider: LLM provider ('ollama', 'openai', 'openai-compatible')
             llm_model: Model name
             llm_api_key: API key for LLM provider
             llm_base_url: Custom base URL for LLM API
@@ -54,50 +61,57 @@ class MultiAgentCoordinator:
         self.verbose = verbose
         self.debug = debug
 
-        # Create shared LLM
+        # Create LLM for Agent A
         self.llm = self._create_llm(llm_provider, llm_model, llm_api_key, llm_base_url, temperature)
 
-        # Initialize specialized agents
-        self.navigator = NavigatorAgent(client, self.llm, verbose)
-        self.reconnaissance = ReconnaissanceAgent(client, self.llm, verbose)
-        self.safety = SafetyMonitorAgent(client, self.llm, verbose)
+        # Initialize Agent A (Planner) and Node B (Tools)
+        self.planner = PlannerAgent(
+            llm=self.llm,
+            client=client,
+            verbose=verbose,
+            debug=debug
+        )
 
-        # Agent registry
-        self.agents = {
-            'navigator': self.navigator,
-            'reconnaissance': self.reconnaissance,
-            'safety': self.safety
-        }
+        self.tools_node = ToolsNode(
+            client=client,
+            verbose=verbose,
+            debug=debug
+        )
 
-        # State
-        self.state: MultiAgentState = {
-            'messages': [],
-            'active_agents': [],
-            'agent_roles': {},
-            'task_queue': [],
-            'completed_tasks': [],
-            'agent_results': {},
-            'shared_context': {},
-            'current_phase': 'idle',
-            'final_plan': None,
-            'final_answer': None,
-            'error': None
-        }
+        # Session context (maintained by Agent A)
+        self.session_context = {}
+        self.execution_history = []
 
         if self.debug:
-            print("✅ Multi-agent coordinator initialized")
-            print(f"   Agents: {list(self.agents.keys())}")
+            print("[OK] Multi-Agent Coordinator (A/B Pipeline) initialized")
+            print(f"   Planner (Agent A): {llm_model}")
+            print(f"   Tools Node (Node B): Stateless executor")
 
-    def _create_llm(self, provider: str, model: str, api_key: Optional[str],
-                   base_url: Optional[str], temperature: float):
-        """Create LLM instance"""
+    def _create_llm(
+        self,
+        provider: str,
+        model: str,
+        api_key: Optional[str],
+        base_url: Optional[str],
+        temperature: float
+    ) -> BaseChatModel:
+        """Create LLM instance for Agent A"""
+        if self.debug:
+            print(f"[AI] Initializing LLM: {provider} ({model})")
+
         if provider == "ollama":
             return ChatOllama(model=model, temperature=temperature)
         elif provider in ["openai", "openai-compatible"]:
             if not api_key:
-                raise ValueError("API key required for OpenAI-compatible providers")
+                raise ValueError(f"API key is required for {provider}")
 
-            final_base_url = base_url or "https://api.openai.com/v1"
+            if provider == "openai":
+                final_base_url = base_url or "https://api.openai.com/v1"
+            else:
+                if not base_url:
+                    raise ValueError("llm_base_url is required for openai-compatible provider")
+                final_base_url = base_url
+
             return ChatOpenAI(
                 model=model,
                 temperature=temperature,
@@ -107,174 +121,200 @@ class MultiAgentCoordinator:
         else:
             raise ValueError(f"Unknown LLM provider: {provider}")
 
-    def execute(self, command: str) -> Dict[str, Any]:
+    def execute(self, user_input: str) -> Dict[str, Any]:
         """
-        Execute a command using multi-agent coordination
+        Execute a command using the A/B pipeline
+
+        Pipeline:
+        1. Agent A generates plan from user input
+        2. Node B validates and fixes the plan
+        3. Node B executes the validated plan
+        4. Coordinator aggregates results for user
 
         Args:
-            command: Natural language command
+            user_input: Natural language command from user
 
         Returns:
-            Result dictionary
+            Result dictionary with plan, validation, and execution info
         """
         if self.debug:
             print(f"\n{'='*60}")
-            print(f"🎯 Multi-Agent Execution")
+            print("[TARGET] Multi-Agent Execution (A/B Pipeline)")
             print(f"{'='*60}")
-            print(f"Command: {command}")
+            print(f"User Input: {user_input}")
             print(f"{'='*60}\n")
 
         try:
-            # Phase 1: Plan decomposition
-            plan = self._decompose_task(command)
+            # Phase 1: Agent A generates plan
+            plan = self.planner.plan(user_input)
 
-            # Phase 2: Execute tasks
-            results = self._execute_plan(plan)
+            if not plan.steps:
+                return {
+                    'success': False,
+                    'output': f"No plan generated. Rationale: {plan.rationale}",
+                    'plan': plan.to_dict(),
+                    'validation': None,
+                    'execution': None
+                }
 
-            # Phase 3: Aggregate results
-            final_answer = self._aggregate_results(results)
+            # Phase 2: Node B validates and fixes
+            validated_plan = self.tools_node.validate_and_fix(plan)
 
-            return {
-                'success': True,
-                'output': final_answer,
-                'intermediate_steps': results,
-                'plan': plan
-            }
+            if not validated_plan.is_valid:
+                return {
+                    'success': False,
+                    'output': f"Plan validation failed. Warnings: {validated_plan.validation_warnings}",
+                    'plan': plan.to_dict(),
+                    'validation': validated_plan.to_dict(),
+                    'execution': None
+                }
+
+            # Phase 3: Node B executes
+            execution_report = self.tools_node.execute(validated_plan)
+
+            # Phase 4: Aggregate results
+            result = self._aggregate_results(
+                plan=plan,
+                validated_plan=validated_plan,
+                execution_report=execution_report
+            )
+
+            # Store in history
+            self.execution_history.append({
+                'user_input': user_input,
+                'plan_id': plan.plan_id,
+                'timestamp': plan.created_at,
+                'status': execution_report.final_status
+            })
+
+            if self.debug:
+                print(f"\n{'='*60}")
+                print("[OK] Pipeline Execution Complete")
+                print(f"{'='*60}")
+                print(f"Status: {execution_report.final_status}")
+                print(f"Steps: {len(plan.steps)} → {len(validated_plan.normalized_steps)} → {len(execution_report.execution_results)}")
+                print(f"Fixes: {len(validated_plan.fixes)}")
+                print(f"Errors: {len(execution_report.errors)}")
+                print(f"{'='*60}\n")
+
+            return result
+
         except Exception as e:
+            if self.debug:
+                print(f"\n{'='*60}")
+                print("[FAIL] Pipeline Execution Failed")
+                print(f"{'='*60}")
+                print(f"Error: {str(e)}")
+                print(f"{'='*60}\n")
+
             return {
                 'success': False,
                 'output': f"Error in multi-agent execution: {str(e)}",
-                'intermediate_steps': [],
-                'plan': None
+                'plan': None,
+                'validation': None,
+                'execution': None
             }
 
-    def _decompose_task(self, command: str) -> Dict[str, Any]:
+    def _aggregate_results(
+        self,
+        plan: Plan,
+        validated_plan: ValidatedPlan,
+        execution_report: ExecutionReport
+    ) -> Dict[str, Any]:
         """
-        Decompose a complex command into sub-tasks
+        Aggregate results from the pipeline into a user-friendly response
 
         Args:
-            command: User command
+            plan: Original plan from Agent A
+            validated_plan: Validated plan from Node B
+            execution_report: Execution results from Node B
 
         Returns:
-            Execution plan
+            Aggregated result dictionary
         """
-        if self.verbose:
-            print("📋 Planning phase: Decomposing task...")
+        # Build user-friendly output
+        output_parts = []
 
-        # Simple heuristic-based task decomposition
-        # In production, this would use the coordinator LLM
-        plan = {
-            'tasks': [],
-            'parallel_execution': False
+        # Add plan rationale
+        if plan.rationale:
+            output_parts.append(f"[PLAN] Plan: {plan.rationale}")
+
+        # Add validation info if fixes were applied
+        if validated_plan.fixes:
+            fix_count = len(validated_plan.fixes)
+            output_parts.append(f"[FIX] Applied {fix_count} fix(es) during validation")
+
+        # Add execution summary
+        output_parts.append(f"\n{execution_report.summary}")
+
+        # Add detailed results if verbose
+        if self.verbose and execution_report.execution_results:
+            output_parts.append("\nDetailed Results:")
+            for result in execution_report.execution_results:
+                if result.success:
+                    output_parts.append(f"  [OK] {result.step_id}: Success")
+                    if result.output and isinstance(result.output, str) and len(result.output) < 100:
+                        output_parts.append(f"     {result.output}")
+                else:
+                    output_parts.append(f"  [FAIL] {result.step_id}: {result.error}")
+
+        # Add errors if any
+        if execution_report.errors:
+            output_parts.append("\nErrors encountered:")
+            for error in execution_report.errors:
+                output_parts.append(f"  [FAIL] {error.get('step_id', 'unknown')}: {error.get('error', 'unknown error')}")
+
+        final_output = "\n".join(output_parts)
+
+        # Determine overall success
+        success = (
+            execution_report.final_status in ['completed', 'partial'] and
+            len(execution_report.errors) == 0
+        )
+
+        return {
+            'success': success,
+            'output': final_output,
+            'plan': plan.to_dict(),
+            'validation': validated_plan.to_dict(),
+            'execution': execution_report.to_dict(),
+            'intermediate_steps': [
+                {
+                    'phase': 'planning',
+                    'agent': 'PlannerAgent',
+                    'result': plan.to_dict()
+                },
+                {
+                    'phase': 'validation',
+                    'agent': 'ToolsNode',
+                    'result': validated_plan.to_dict()
+                },
+                {
+                    'phase': 'execution',
+                    'agent': 'ToolsNode',
+                    'result': execution_report.to_dict()
+                }
+            ]
         }
 
-        command_lower = command.lower()
-
-        # Determine which agents are needed
-        if any(word in command_lower for word in ['move', 'go to', 'take off', 'land', 'navigate']):
-            plan['tasks'].append({
-                'agent': 'navigator',
-                'command': command,
-                'priority': 'high'
-            })
-
-        if any(word in command_lower for word in ['photo', 'picture', 'survey', 'target', 'reconnaissance']):
-            plan['tasks'].append({
-                'agent': 'reconnaissance',
-                'command': command,
-                'priority': 'medium'
-            })
-
-        if any(word in command_lower for word in ['safety', 'battery', 'weather', 'check']):
-            plan['tasks'].append({
-                'agent': 'safety',
-                'command': f"Check safety status for: {command}",
-                'priority': 'high'
-            })
-
-        # Default to navigator if no specific agent identified
-        if not plan['tasks']:
-            plan['tasks'].append({
-                'agent': 'navigator',
-                'command': command,
-                'priority': 'normal'
-            })
-
-        if self.verbose:
-            print(f"   Plan created with {len(plan['tasks'])} tasks")
-            for i, task in enumerate(plan['tasks']):
-                print(f"   {i+1}. [{task['agent']}] {task['command'][:50]}...")
-
-        return plan
-
-    def _execute_plan(self, plan: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Execute the plan by delegating to specialized agents
-
-        Args:
-            plan: Execution plan
-
-        Returns:
-            List of results from each task
-        """
-        if self.verbose:
-            print("\n⚙️  Execution phase: Running tasks...")
-
-        results = []
-
-        for task in plan['tasks']:
-            agent_name = task['agent']
-            command = task['command']
-
-            agent = self.agents.get(agent_name)
-            if not agent:
-                if self.verbose:
-                    print(f"   ⚠️  Unknown agent: {agent_name}")
-                continue
-
-            # Execute task
-            result = agent.execute({'command': command})
-            results.append(result)
-
+    def refresh_session_context(self):
+        """Refresh session context information"""
+        try:
+            session = self.client.get_current_session()
+            self.session_context = {
+                'session_id': session.get('id'),
+                'task_type': session.get('task'),
+                'task_description': session.get('task_description'),
+                'status': session.get('status')
+            }
             if self.verbose:
-                status = "✅" if result['success'] else "❌"
-                print(f"   {status} [{agent_name}] {result['output'][:50]}...")
-
-        return results
-
-    def _aggregate_results(self, results: List[Dict[str, Any]]) -> str:
-        """
-        Aggregate results from multiple agents
-
-        Args:
-            results: List of agent results
-
-        Returns:
-            Aggregated answer
-        """
-        if self.verbose:
-            print("\n📊 Aggregation phase: Combining results...")
-
-        if not results:
-            return "No results to aggregate."
-
-        # Combine outputs
-        outputs = []
-        for result in results:
-            if result['success']:
-                agent = result.get('agent', 'Unknown')
-                output = result.get('output', '')
-                outputs.append(f"[{agent}]: {output}")
-
-        if outputs:
-            final_answer = "\n".join(outputs) + "\n\n[TASK DONE]"
-        else:
-            final_answer = "All tasks failed."
-
-        return final_answer
+                print("🔄 Session context refreshed")
+        except Exception as e:
+            if self.verbose:
+                print(f"Warning: Could not refresh session context: {e}")
 
     def get_session_summary(self) -> str:
-        """Get session summary from the coordinator's perspective"""
+        """Get a summary of the current session"""
         try:
             session = self.client.get_current_session()
             progress = self.client.get_task_progress()
@@ -283,17 +323,27 @@ class MultiAgentCoordinator:
             summary = f"""
 === Multi-Agent Session Summary ===
 Session: {session.get('name', 'Unknown')}
-Task: {session.get('task', 'Unknown')}
+Task: {session.get('task', 'Unknown')} - {session.get('task_description', '')}
 Status: {session.get('status', 'Unknown')}
 
-Active Agents: {len(self.agents)}
-Agents: {', '.join(self.agents.keys())}
+Architecture: A/B Pipeline
+  - Agent A (Planner): Strategic planning and conversation
+  - Node B (Tools): Validation, execution, stateless
 
-Progress: {progress.get('progress_percentage', 0)}%
+Progress: {progress.get('progress_percentage', 0)}% ({progress.get('status_message', 'Unknown')})
 Completed: {progress.get('is_completed', False)}
+
+Executions: {len(self.execution_history)} command(s) processed
 
 Drones: {len(drones)} available
 """
+            for drone in drones:
+                summary += f"  - {drone.get('name')} ({drone.get('id')}): {drone.get('status')}, Battery: {drone.get('battery_level', 0):.1f}%\n"
+
             return summary.strip()
         except Exception as e:
             return f"Error getting session summary: {e}"
+
+    def get_execution_history(self) -> list:
+        """Get history of executions in this session"""
+        return self.execution_history.copy()
