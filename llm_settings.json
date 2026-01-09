@@ -40,7 +40,7 @@
       "models_endpoint": "/v1/anthropic",
       "chat_endpoint": "/v1/chat/completions",
       "requires_api_key": true,
-      "api_key": "sk_****【请将API key填入这里】",
+      "api_key": "sk_****\u3010\u8bf7\u5c06API key\u586b\u5165\u8fd9\u91cc\u3011",
       "encoding": "utf-8",
       "default_model": "deepseek/deepseek-v3.2-exp",
       "default_models": [
